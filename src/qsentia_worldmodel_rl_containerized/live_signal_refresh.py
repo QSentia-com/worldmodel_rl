@@ -27,6 +27,7 @@ else:  # pragma: no cover
 
 from .artifact_manager import download_lakefs_artifacts, validate_artifacts
 from .config import LakeFSRuntimeConfig, bool_env
+from .live_signal_source import maybe_apply_current_signal_source
 from .signal_inference import _candidate_rows, _order_map, _run_mode, _selected_decisions, _signal_date
 from .structured_logging import emit_event
 
@@ -96,7 +97,10 @@ def main() -> int:
     )
 
     downloaded = download_lakefs_artifacts(artifact_config)
+    current_signal_source = maybe_apply_current_signal_source(artifact_config)
     report = build_live_signal_refresh_report(artifact_config.artifact_dir)
+    if current_signal_source:
+        report["current_signal_source"] = current_signal_source
     report["artifact_source"] = artifact_source
     report["downloaded_artifact_files"] = len(downloaded)
     published = publish_live_signal_refresh_report(artifact_config, report)

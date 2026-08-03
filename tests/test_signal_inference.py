@@ -7,10 +7,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qsentia_worldmodel_rl_containerized.config import SignalRuntimeConfig
+from qsentia_worldmodel_rl_containerized.config import LakeFSRuntimeConfig
 from qsentia_worldmodel_rl_containerized.live_signal_refresh import (
     assert_live_signal_refresh_ready,
     build_live_signal_refresh_report,
 )
+from qsentia_worldmodel_rl_containerized.live_signal_source import maybe_apply_current_signal_source
 from qsentia_worldmodel_rl_containerized.signal_inference import run_signal_inference
 
 
@@ -127,6 +129,125 @@ class SignalInferenceTests(unittest.TestCase):
                     accepted = assert_live_signal_refresh_ready(object())  # type: ignore[arg-type]
             self.assertEqual(accepted["status"], "ready")
 
+    def test_current_blotter_overlays_historical_artifact_for_same_day_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifact(root)
+            blotter_path = root / "current_blotter.csv"
+            blotter_path.write_text(
+                "\n".join(
+                    [
+                        "ticker,entry_date,event_date,exit_date,action,qty,confidence,score,call_contract,put_contract",
+                        "AAPL,2026-08-03,2026-08-05,2026-08-07,long_vol,2,0.91,0.44,O:AAPL260814C00200000,O:AAPL260814P00200000",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = _lakefs_config(root)
+            signal_config = SignalRuntimeConfig(
+                output_path=root / "latest_signal.json",
+                append_signal_log=False,
+                use_ppo_policy=False,
+                require_ppo_policy=False,
+                target_gross_exposure=1.0,
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "QSENTIA_SIGNAL_DATE": "2026-08-03",
+                    "QSENTIA_RUN_MODE": "entry",
+                    "QSENTIA_WORLD_RL_CURRENT_BLOTTER_PATH": str(blotter_path),
+                    "QSENTIA_VALIDATE_MASSIVE_OPTION_DATA": "false",
+                },
+                clear=False,
+            ):
+                applied = maybe_apply_current_signal_source(config)
+                report = build_live_signal_refresh_report(root)
+                payload = run_signal_inference(root, signal_config)
+
+            self.assertEqual(applied["status"], "applied")
+            self.assertEqual(applied["decision_rows"], 1)
+            self.assertEqual(applied["order_map_rows"], 2)
+            self.assertEqual(report["status"], "ready")
+            self.assertEqual(report["candidate_rows"], 1)
+            self.assertEqual(report["mapped_option_legs"], 2)
+            self.assertEqual(payload["signal"]["metadata"]["candidate_rows"], 1)
+            self.assertEqual(payload["signal"]["metadata"]["artifact_live_trading_enabled"], False)
+            self.assertEqual(payload["signal"]["metadata"]["current_signal_execution_enabled"], False)
+            self.assertEqual(payload["trade"]["artifact_live_trading_enabled"], False)
+            order = payload["trade"]["orders"][0]
+            self.assertEqual(order["qty"], "2")
+            self.assertEqual([leg["symbol"] for leg in order["legs"]], ["AAPL260814C00200000", "AAPL260814P00200000"])
+            self.assertEqual([leg["position_intent"] for leg in order["legs"]], ["sell_to_open", "sell_to_open"])
+
+    def test_current_blotter_can_explicitly_enable_current_signal_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifact(root)
+            blotter_path = root / "current_blotter.csv"
+            blotter_path.write_text(
+                "\n".join(
+                    [
+                        "ticker,entry_date,event_date,exit_date,action,qty,call_contract,put_contract",
+                        "AAPL,2026-08-03,2026-08-05,2026-08-07,long_vol,1,O:AAPL260814C00200000,O:AAPL260814P00200000",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            config = _lakefs_config(root)
+            signal_config = SignalRuntimeConfig(
+                output_path=root / "latest_signal.json",
+                append_signal_log=False,
+                use_ppo_policy=False,
+                require_ppo_policy=False,
+                target_gross_exposure=1.0,
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "QSENTIA_SIGNAL_DATE": "2026-08-03",
+                    "QSENTIA_RUN_MODE": "entry",
+                    "QSENTIA_WORLD_RL_CURRENT_BLOTTER_PATH": str(blotter_path),
+                    "QSENTIA_ALLOW_WORLD_RL_CURRENT_SIGNAL_EXECUTION": "true",
+                },
+                clear=False,
+            ):
+                maybe_apply_current_signal_source(config)
+                payload = run_signal_inference(root, signal_config)
+
+            self.assertEqual(payload["signal"]["metadata"]["artifact_live_trading_enabled"], False)
+            self.assertEqual(payload["signal"]["metadata"]["current_signal_execution_enabled"], True)
+            self.assertEqual(payload["trade"]["artifact_live_trading_enabled"], True)
+
+    def test_current_blotter_rejects_non_current_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifact(root)
+            blotter_path = root / "stale_blotter.csv"
+            blotter_path.write_text(
+                "\n".join(
+                    [
+                        "ticker,entry_date,event_date,exit_date,action,qty,call_contract,put_contract",
+                        "AAPL,2026-08-02,2026-08-05,2026-08-07,long_vol,1,O:AAPL260814C00200000,O:AAPL260814P00200000",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "QSENTIA_SIGNAL_DATE": "2026-08-03",
+                    "QSENTIA_RUN_MODE": "entry",
+                    "QSENTIA_WORLD_RL_CURRENT_BLOTTER_PATH": str(blotter_path),
+                },
+                clear=False,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "no same-day decision rows"):
+                    maybe_apply_current_signal_source(_lakefs_config(root))
+
 
 def _write_artifact(root: Path, *, selected_model: str = "v12b_small_rl_guardian") -> None:
     version = "v12b_exact_same_leg_inverse_plus_small_rl_guardian_v1"
@@ -143,6 +264,7 @@ def _write_artifact(root: Path, *, selected_model: str = "v12b_small_rl_guardian
         ),
         encoding="utf-8",
     )
+
     (root / "live_state.json").write_text(
         json.dumps({**identity, "live_trading_enabled": False, "order_mapping_required": "exact_same_leg_inverse"}),
         encoding="utf-8",
@@ -173,6 +295,20 @@ def _write_artifact(root: Path, *, selected_model: str = "v12b_small_rl_guardian
         )
         + "\n",
         encoding="utf-8",
+    )
+
+
+def _lakefs_config(root: Path) -> LakeFSRuntimeConfig:
+    return LakeFSRuntimeConfig(
+        endpoint="",
+        access_key_id="",
+        secret_access_key="",
+        repository="qsentia-models",
+        artifact_ref="main",
+        artifact_object="world_rl/test.zip",
+        artifact_dir=root,
+        clean=False,
+        skip_download=True,
     )
 
 
