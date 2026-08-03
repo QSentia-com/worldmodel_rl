@@ -5,15 +5,29 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from types import ModuleType
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-import requests
-import s3fs
+try:
+    import requests
+except ImportError as exc:  # pragma: no cover
+    requests = None
+    _REQUESTS_IMPORT_ERROR = exc
+else:  # pragma: no cover
+    _REQUESTS_IMPORT_ERROR = None
+
+try:
+    import s3fs
+except ImportError as exc:  # pragma: no cover
+    s3fs = None
+    _S3FS_IMPORT_ERROR = exc
+else:  # pragma: no cover
+    _S3FS_IMPORT_ERROR = None
 
 from .artifact_manager import download_lakefs_artifacts, validate_artifacts
 from .config import LakeFSRuntimeConfig, bool_env
-from .output_publisher import output_prefix_from_env, run_id_from_env
+from .live_signal_source import maybe_apply_current_signal_source
 from .signal_inference import _candidate_rows, _order_map, _run_mode, _selected_decisions, _signal_date
 from .structured_logging import emit_event
 
@@ -40,7 +54,7 @@ class MassiveOptionsClient:
             "limit": "10",
             "apiKey": self.api_key,
         }
-        response = requests.get(
+        response = _requests().get(
             f"{self.base_url}/v3/reference/options/contracts",
             params=params,
             headers={"accept": "application/json", "connection": "close"},
@@ -83,7 +97,10 @@ def main() -> int:
     )
 
     downloaded = download_lakefs_artifacts(artifact_config)
+    current_signal_source = maybe_apply_current_signal_source(artifact_config)
     report = build_live_signal_refresh_report(artifact_config.artifact_dir)
+    if current_signal_source:
+        report["current_signal_source"] = current_signal_source
     report["artifact_source"] = artifact_source
     report["downloaded_artifact_files"] = len(downloaded)
     published = publish_live_signal_refresh_report(artifact_config, report)
@@ -184,15 +201,15 @@ def publish_live_signal_refresh_report(
     if artifact_config.skip_download and not artifact_config.endpoint:
         return None
 
-    output_prefix = output_prefix_from_env()
-    run_id = run_id_from_env()
+    output_prefix = _output_prefix_from_env()
+    run_id = _run_id_from_env()
     run_mode = str(report.get("run_mode") or "entry")
     local_dir = Path(os.getenv("QSENTIA_OUTPUT_DIR", "/app/outputs"))
     local_dir.mkdir(parents=True, exist_ok=True)
     report_path = local_dir / "live_signal_refresh.json"
     report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
 
-    filesystem = s3fs.S3FileSystem(**artifact_config.storage_options)
+    filesystem = _s3_filesystem(artifact_config)
     base_uri = f"s3://{artifact_config.repository}/{artifact_config.artifact_ref}/{output_prefix}/live-refresh/{run_mode}"
     latest_uri = f"{base_uri}/latest.json"
     run_uri = f"{base_uri}/{run_id}.json"
@@ -201,7 +218,7 @@ def publish_live_signal_refresh_report(
 
     result = {"run_id": run_id, "live_signal_refresh_uri": latest_uri, "run_live_signal_refresh_uri": run_uri}
     if bool_env("QSENTIA_COMMIT_OUTPUTS", True):
-        response = requests.post(
+        response = _requests().post(
             f"{artifact_config.endpoint}/api/v1/repositories/{artifact_config.repository}/branches/{artifact_config.artifact_ref}/commits",
             auth=(artifact_config.access_key_id, artifact_config.secret_access_key),
             json={"message": f"publish WORLD_MODEL-RL live signal refresh {run_id}"},
@@ -257,10 +274,10 @@ def load_live_signal_refresh_report(artifact_config: LakeFSRuntimeConfig, run_mo
     if local_path:
         return _read_json(Path(local_path))
 
-    filesystem = s3fs.S3FileSystem(**artifact_config.storage_options)
+    filesystem = _s3_filesystem(artifact_config)
     uri = (
         f"s3://{artifact_config.repository}/{artifact_config.artifact_ref}/"
-        f"{output_prefix_from_env()}/live-refresh/{run_mode}/latest.json"
+        f"{_output_prefix_from_env()}/live-refresh/{run_mode}/latest.json"
     )
     if not filesystem.exists(uri):
         raise RuntimeError(f"WORLD_MODEL-RL live refresh report does not exist: {uri}")
@@ -336,6 +353,34 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"Expected JSON object in {path}")
     return payload
+
+
+def _output_prefix_from_env() -> str:
+    return os.getenv("QSENTIA_OUTPUT_PREFIX", "inference_outputs/world-model-rl").strip("/")
+
+
+def _run_id_from_env() -> str:
+    explicit = os.getenv("QSENTIA_RUN_ID", "").strip()
+    if explicit:
+        return explicit
+    batch_job_id = os.getenv("AWS_BATCH_JOB_ID", "").strip()
+    if batch_job_id:
+        return batch_job_id
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _s3_filesystem(artifact_config: LakeFSRuntimeConfig) -> Any:
+    if s3fs is None:
+        raise RuntimeError("Install s3fs to read or publish WORLD_MODEL-RL live refresh reports.") from _S3FS_IMPORT_ERROR
+    return s3fs.S3FileSystem(**artifact_config.storage_options)
+
+
+def _requests() -> ModuleType:
+    if requests is None:
+        raise RuntimeError("Install requests to validate option data or publish WORLD_MODEL-RL reports.") from (
+            _REQUESTS_IMPORT_ERROR
+        )
+    return requests
 
 
 def _refresh_summary(report: dict[str, Any]) -> dict[str, Any]:

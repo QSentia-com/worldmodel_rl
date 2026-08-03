@@ -31,6 +31,7 @@ def run_signal_inference(
     metadata = _read_json(resolved_artifact_dir / "model_metadata.json")
     live_state = _read_json(resolved_artifact_dir / "live_state.json")
     action_mapping = _read_json(resolved_artifact_dir / "deployment_action_mapping.json")
+    current_signal_source = _read_optional_json(resolved_artifact_dir / "live_signal_source_report.json")
 
     now = datetime.now(timezone.utc)
     run_mode = _run_mode()
@@ -53,7 +54,13 @@ def run_signal_inference(
     max_orders = int(os.getenv("QSENTIA_MAX_OPTION_ORDERS", "25"))
     orders = orders[:max_orders]
 
-    live_trading_enabled = _bool(live_state.get("live_trading_enabled")) and _bool(action_mapping.get("live_trading_enabled"))
+    artifact_live_trading_enabled = _bool(live_state.get("live_trading_enabled")) and _bool(
+        action_mapping.get("live_trading_enabled")
+    )
+    current_signal_execution_enabled = bool_env("QSENTIA_ALLOW_WORLD_RL_CURRENT_SIGNAL_EXECUTION", False) and bool(
+        current_signal_source and current_signal_source.get("status") == "applied"
+    )
+    live_trading_enabled = artifact_live_trading_enabled or current_signal_execution_enabled
     signal_label = f"{run_mode}:{signal_date}"
     signal = {
         "asof": now.isoformat(),
@@ -70,7 +77,9 @@ def run_signal_inference(
             "strategy_name": metadata.get("strategy_name"),
             "strategy_mode": metadata.get("strategy_mode"),
             "asset_symbol": metadata.get("asset_symbol"),
-            "artifact_live_trading_enabled": live_trading_enabled,
+            "artifact_live_trading_enabled": artifact_live_trading_enabled,
+            "current_signal_execution_enabled": current_signal_execution_enabled,
+            "current_signal_source": current_signal_source,
             "order_mapping_required": live_state.get("order_mapping_required"),
             "run_mode": run_mode,
             "signal_date": signal_date,
@@ -242,6 +251,12 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"Expected JSON object in {path}")
     return payload
+
+
+def _read_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return _read_json(path)
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
