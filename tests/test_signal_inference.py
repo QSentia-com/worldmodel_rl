@@ -3,12 +3,16 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 from qsentia_worldmodel_rl_containerized.config import SignalRuntimeConfig
 from qsentia_worldmodel_rl_containerized.config import LakeFSRuntimeConfig
-from qsentia_worldmodel_rl_containerized.autonomous_signal_source import maybe_apply_autonomous_current_signal_source
+from qsentia_worldmodel_rl_containerized.autonomous_signal_source import (
+    MassiveLiveDataClient,
+    maybe_apply_autonomous_current_signal_source,
+)
 from qsentia_worldmodel_rl_containerized.live_signal_refresh import (
     assert_live_signal_refresh_ready,
     build_live_signal_refresh_report,
@@ -323,6 +327,18 @@ class SignalInferenceTests(unittest.TestCase):
             self.assertEqual(payload["signal"]["signal"], "no_current_signal")
             self.assertEqual(payload["trade"]["orders"], [])
 
+    def test_massive_earnings_fetch_honors_row_limit_across_pages(self) -> None:
+        fake_requests = _FakePagedRequests()
+        with patch(
+            "qsentia_worldmodel_rl_containerized.autonomous_signal_source._requests",
+            return_value=fake_requests,
+        ):
+            client = MassiveLiveDataClient(api_key="test", sleep_seconds=0)
+            rows = client.benzinga_earnings(date(2026, 8, 3), date(2026, 8, 10), limit=5)
+
+        self.assertEqual([row["ticker"] for row in rows], ["A", "B", "C", "D", "E"])
+        self.assertEqual(len(fake_requests.calls), 2)
+
 
 def _write_artifact(root: Path, *, selected_model: str = "v12b_small_rl_guardian") -> None:
     version = "v12b_exact_same_leg_inverse_plus_small_rl_guardian_v1"
@@ -385,6 +401,31 @@ def _lakefs_config(root: Path) -> LakeFSRuntimeConfig:
         clean=False,
         skip_download=True,
     )
+
+
+class _FakeMassiveResponse:
+    status_code = 200
+    text = ""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _FakePagedRequests:
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        self.calls.append({"url": url, "params": params, "headers": headers, "timeout": timeout})
+        pages = [
+            {"results": [{"ticker": "A"}, {"ticker": "B"}, {"ticker": "C"}], "next_url": "https://next.test/page/2"},
+            {"results": [{"ticker": "D"}, {"ticker": "E"}, {"ticker": "F"}], "next_url": "https://next.test/page/3"},
+            {"results": [{"ticker": "G"}]},
+        ]
+        return _FakeMassiveResponse(pages[min(len(self.calls) - 1, len(pages) - 1)])
 
 
 class _FakeLiveDataClient:
