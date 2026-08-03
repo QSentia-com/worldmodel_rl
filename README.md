@@ -19,6 +19,13 @@ Current live signal handoff:
 - The job overlays those current rows onto the downloaded artifact, refuses non-current rows, validates the mapped option contracts through Massive/Polygon when `QSENTIA_VALIDATE_MASSIVE_OPTION_DATA=true`, and only then builds Alpaca option multi-leg orders.
 - To allow paper execution from a fresh current source while the research artifact still declares `live_trading_enabled=false`, set `QSENTIA_ALLOW_WORLD_RL_CURRENT_SIGNAL_EXECUTION=true` together with the normal explicit execution flags.
 
+Autonomous live signal generation:
+
+- Set `QSENTIA_WORLD_RL_AUTONOMOUS_SIGNAL_ENABLED=true` when no explicit current handoff file is provided.
+- The entry job then pulls current Benzinga event data, underlying daily prices, option contracts, and option snapshot marks from Massive/Polygon, builds a same-day `selected_decisions_live.csv` plus `live_order_map.csv`, validates the contracts, and submits only the resulting current Alpaca option order.
+- If no current event/options setup passes the guardrails, the job writes an accepted `no_current_signal` report and submits no order. It does not fall back to historical artifact rows.
+- Generated current signal bundles are stored under `inference_outputs/world-model-rl/current-signals/` so scheduled exit runs can restore the exact entry legs when they are due to close.
+
 Current production artifact:
 
 `lakefs://qsentia-models/main/world_rl/v12b_small_rl_guardian_full_model_artifact.zip`

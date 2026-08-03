@@ -5,6 +5,7 @@ import os
 
 from .alpaca_execution import execute_alpaca_trade_intent
 from .artifact_manager import download_lakefs_artifacts
+from .autonomous_signal_source import maybe_apply_autonomous_current_signal_source
 from .config import LakeFSRuntimeConfig, bool_env
 from .db_outputs import record_alpaca_trade_orders, record_inference_output
 from .live_signal_refresh import assert_live_signal_refresh_ready, build_live_signal_refresh_report
@@ -35,6 +36,8 @@ def main() -> int:
     )
 
     current_signal_source = maybe_apply_current_signal_source(artifact_config)
+    if not current_signal_source:
+        current_signal_source = maybe_apply_autonomous_current_signal_source(artifact_config)
     if current_signal_source:
         refresh_report = build_live_signal_refresh_report(artifact_config.artifact_dir)
         refresh_report["current_signal_source"] = current_signal_source
