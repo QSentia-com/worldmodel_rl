@@ -7,6 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from qsentia_worldmodel_rl_containerized.config import SignalRuntimeConfig
+from qsentia_worldmodel_rl_containerized.live_signal_refresh import (
+    assert_live_signal_refresh_ready,
+    build_live_signal_refresh_report,
+)
 from qsentia_worldmodel_rl_containerized.signal_inference import run_signal_inference
 
 
@@ -61,6 +65,67 @@ class SignalInferenceTests(unittest.TestCase):
                 payload = run_signal_inference(root, config)
             self.assertEqual(payload["signal"]["signal"], "no_current_signal")
             self.assertEqual(payload["trade"]["orders"], [])
+
+    def test_live_refresh_rejects_historical_artifact_for_current_signal_date(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifact(root)
+            with patch.dict("os.environ", {"QSENTIA_SIGNAL_DATE": "2026-08-03", "QSENTIA_RUN_MODE": "entry"}, clear=False):
+                report = build_live_signal_refresh_report(root)
+            self.assertEqual(report["status"], "stale_artifact")
+            self.assertEqual(report["accepted_for_execution"], False)
+
+    def test_live_refresh_accepts_same_day_signal_when_option_data_validation_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifact(root)
+            with patch.dict(
+                "os.environ",
+                {
+                    "QSENTIA_SIGNAL_DATE": "2020-08-07",
+                    "QSENTIA_RUN_MODE": "entry",
+                    "QSENTIA_VALIDATE_MASSIVE_OPTION_DATA": "false",
+                },
+                clear=False,
+            ):
+                report = build_live_signal_refresh_report(root)
+            self.assertEqual(report["status"], "ready")
+            self.assertEqual(report["accepted_for_execution"], True)
+            self.assertEqual(report["mapped_option_legs"], 2)
+
+    def test_order_job_can_require_local_live_refresh_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_path = root / "refresh.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "asof": "2026-08-03T13:15:00+00:00",
+                        "run_mode": "entry",
+                        "signal_date": "2026-08-03",
+                        "status": "ready",
+                        "accepted_for_execution": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("qsentia_worldmodel_rl_containerized.live_signal_refresh.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = __import__("datetime").datetime(
+                    2026, 8, 3, 13, 40, tzinfo=__import__("datetime").timezone.utc
+                )
+                mocked_datetime.fromisoformat.side_effect = __import__("datetime").datetime.fromisoformat
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "QSENTIA_REQUIRE_FRESH_OPTION_DATA": "true",
+                        "QSENTIA_LIVE_REFRESH_LOCAL_PATH": str(report_path),
+                        "QSENTIA_SIGNAL_DATE": "2026-08-03",
+                        "QSENTIA_RUN_MODE": "entry",
+                    },
+                    clear=False,
+                ):
+                    accepted = assert_live_signal_refresh_ready(object())  # type: ignore[arg-type]
+            self.assertEqual(accepted["status"], "ready")
 
 
 def _write_artifact(root: Path, *, selected_model: str = "v12b_small_rl_guardian") -> None:

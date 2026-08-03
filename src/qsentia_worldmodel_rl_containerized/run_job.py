@@ -7,6 +7,7 @@ from .alpaca_execution import execute_alpaca_trade_intent
 from .artifact_manager import download_lakefs_artifacts
 from .config import LakeFSRuntimeConfig
 from .db_outputs import record_alpaca_trade_orders, record_inference_output
+from .live_signal_refresh import assert_live_signal_refresh_ready
 from .output_publisher import publish_outputs_to_lakefs
 from .signal_inference import run_signal_inference
 from .structured_logging import build_signal_summary, emit_event
@@ -32,6 +33,18 @@ def main() -> int:
         skipped_download=artifact_config.skip_download,
     )
 
+    refresh_report = assert_live_signal_refresh_ready(artifact_config)
+    if refresh_report:
+        emit_event(
+            "world_model_rl_live_signal_refresh_verified",
+            status=refresh_report.get("status"),
+            run_mode=refresh_report.get("run_mode"),
+            signal_date=refresh_report.get("signal_date"),
+            asof=refresh_report.get("asof"),
+            candidate_rows=refresh_report.get("candidate_rows"),
+            mapped_option_legs=refresh_report.get("mapped_option_legs"),
+        )
+
     signal_payload = run_signal_inference(artifact_dir=artifact_config.artifact_dir)
     execution_report = execute_alpaca_trade_intent(signal_payload.get("trade"))
     if execution_report:
@@ -44,6 +57,8 @@ def main() -> int:
         "downloaded_artifact_files": len(downloaded),
         "inference": signal_payload,
     }
+    if refresh_report:
+        run_payload["live_signal_refresh"] = refresh_report
 
     published_outputs = publish_outputs_to_lakefs(artifact_config, signal_payload, run_payload)
     if published_outputs:
@@ -80,4 +95,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
