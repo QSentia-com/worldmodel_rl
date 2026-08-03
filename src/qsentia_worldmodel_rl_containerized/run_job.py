@@ -5,9 +5,11 @@ import os
 
 from .alpaca_execution import execute_alpaca_trade_intent
 from .artifact_manager import download_lakefs_artifacts
-from .config import LakeFSRuntimeConfig
+from .autonomous_signal_source import maybe_apply_autonomous_current_signal_source
+from .config import LakeFSRuntimeConfig, bool_env
 from .db_outputs import record_alpaca_trade_orders, record_inference_output
-from .live_signal_refresh import assert_live_signal_refresh_ready
+from .live_signal_refresh import assert_live_signal_refresh_ready, build_live_signal_refresh_report
+from .live_signal_source import maybe_apply_current_signal_source
 from .output_publisher import publish_outputs_to_lakefs
 from .signal_inference import run_signal_inference
 from .structured_logging import build_signal_summary, emit_event
@@ -33,7 +35,18 @@ def main() -> int:
         skipped_download=artifact_config.skip_download,
     )
 
-    refresh_report = assert_live_signal_refresh_ready(artifact_config)
+    current_signal_source = maybe_apply_current_signal_source(artifact_config)
+    if not current_signal_source:
+        current_signal_source = maybe_apply_autonomous_current_signal_source(artifact_config)
+    if current_signal_source:
+        refresh_report = build_live_signal_refresh_report(artifact_config.artifact_dir)
+        refresh_report["current_signal_source"] = current_signal_source
+        if not refresh_report.get("accepted_for_execution"):
+            raise RuntimeError(f"WORLD_MODEL-RL current signal source failed validation: {refresh_report.get('status')}")
+    else:
+        refresh_report = assert_live_signal_refresh_ready(artifact_config)
+    if bool_env("QSENTIA_REQUIRE_FRESH_OPTION_DATA", False) and not refresh_report:
+        raise RuntimeError("WORLD_MODEL-RL requires fresh option data but no refresh report was available.")
     if refresh_report:
         emit_event(
             "world_model_rl_live_signal_refresh_verified",

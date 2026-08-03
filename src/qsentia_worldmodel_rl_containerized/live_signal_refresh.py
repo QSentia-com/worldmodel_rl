@@ -26,7 +26,9 @@ else:  # pragma: no cover
     _S3FS_IMPORT_ERROR = None
 
 from .artifact_manager import download_lakefs_artifacts, validate_artifacts
+from .autonomous_signal_source import maybe_apply_autonomous_current_signal_source
 from .config import LakeFSRuntimeConfig, bool_env
+from .live_signal_source import maybe_apply_current_signal_source
 from .signal_inference import _candidate_rows, _order_map, _run_mode, _selected_decisions, _signal_date
 from .structured_logging import emit_event
 
@@ -96,7 +98,12 @@ def main() -> int:
     )
 
     downloaded = download_lakefs_artifacts(artifact_config)
+    current_signal_source = maybe_apply_current_signal_source(artifact_config)
+    if not current_signal_source:
+        current_signal_source = maybe_apply_autonomous_current_signal_source(artifact_config)
     report = build_live_signal_refresh_report(artifact_config.artifact_dir)
+    if current_signal_source:
+        report["current_signal_source"] = current_signal_source
     report["artifact_source"] = artifact_source
     report["downloaded_artifact_files"] = len(downloaded)
     published = publish_live_signal_refresh_report(artifact_config, report)
@@ -116,6 +123,7 @@ def build_live_signal_refresh_report(artifact_dir: Path | str) -> dict[str, Any]
     now = datetime.now(timezone.utc)
     run_mode = _run_mode()
     signal_date = _signal_date()
+    current_signal_source = _read_optional_json(resolved_artifact_dir / "live_signal_source_report.json")
     selected_rows = _selected_decisions(resolved_artifact_dir)
     date_column = "exit_date" if run_mode == "exit" else "entry_date"
     candidate_rows = _candidate_rows(selected_rows, run_mode, signal_date)
@@ -141,6 +149,15 @@ def build_live_signal_refresh_report(artifact_dir: Path | str) -> dict[str, Any]
         "mapped_option_legs": 0,
         "accepted_for_execution": False,
     }
+
+    if _is_current_no_signal_report(current_signal_source, run_mode=run_mode, signal_date=signal_date):
+        report.update(
+            status="no_current_signal",
+            reason=current_signal_source.get("reason", f"no {run_mode} signal selected for {signal_date}"),
+            current_signal_source=current_signal_source,
+            accepted_for_execution=True,
+        )
+        return report
 
     if not selected_rows:
         report.update(status="missing_selected_decisions", reason="selected_decisions_live.csv had no valid RL rows")
@@ -186,6 +203,22 @@ def build_live_signal_refresh_report(artifact_dir: Path | str) -> dict[str, Any]
     report.update(status="ready", reason=f"{len(candidate_rows)} current {run_mode} signal rows validated")
     report["accepted_for_execution"] = True
     return report
+
+
+def _is_current_no_signal_report(
+    report: dict[str, Any] | None,
+    *,
+    run_mode: str,
+    signal_date: str,
+) -> bool:
+    if not isinstance(report, dict):
+        return False
+    return (
+        str(report.get("status") or "") == "no_current_signal"
+        and str(report.get("run_mode") or "") == run_mode
+        and str(report.get("signal_date") or "")[:10] == signal_date
+        and bool(report.get("accepted_for_execution"))
+    )
 
 
 def publish_live_signal_refresh_report(
@@ -349,6 +382,12 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"Expected JSON object in {path}")
     return payload
+
+
+def _read_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return _read_json(path)
 
 
 def _output_prefix_from_env() -> str:
