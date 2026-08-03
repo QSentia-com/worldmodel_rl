@@ -116,6 +116,7 @@ class MassiveLiveDataClient:
                 "limit": str(limit),
                 "sort": "date.asc",
             },
+            max_rows=max(1, limit),
         )
 
     def stock_daily_bars(self, ticker: str, start: date, end: date) -> list[dict[str, Any]]:
@@ -126,9 +127,11 @@ class MassiveLiveDataClient:
                 "sort": "asc",
                 "limit": "5000",
             },
+            max_rows=5000,
         )
 
     def option_contracts(self, ticker: str, start: date, end: date) -> list[dict[str, Any]]:
+        row_limit = _int_env("QSENTIA_WORLD_RL_MAX_OPTION_CONTRACT_ROWS", 1000)
         return self._paged(
             "/v3/reference/options/contracts",
             {
@@ -139,6 +142,7 @@ class MassiveLiveDataClient:
                 "sort": "expiration_date",
                 "order": "asc",
             },
+            max_rows=max(1, row_limit),
         )
 
     def option_previous_bar(self, option_ticker: str) -> dict[str, Any] | None:
@@ -153,13 +157,17 @@ class MassiveLiveDataClient:
         results = payload.get("results") if isinstance(payload, dict) else None
         return results if isinstance(results, dict) else None
 
-    def _paged(self, path: str, params: dict[str, str]) -> list[dict[str, Any]]:
+    def _paged(self, path: str, params: dict[str, str], *, max_rows: int | None = None) -> list[dict[str, Any]]:
         payload = self._get(path, params)
         rows = _payload_rows(payload)
+        if max_rows is not None and len(rows) >= max_rows:
+            return rows[:max_rows]
         next_url = payload.get("next_url") if isinstance(payload, dict) else None
-        while next_url:
+        while next_url and (max_rows is None or len(rows) < max_rows):
             payload = self._get(str(next_url), {}, full_url=True)
             rows.extend(_payload_rows(payload))
+            if max_rows is not None and len(rows) >= max_rows:
+                return rows[:max_rows]
             next_url = payload.get("next_url") if isinstance(payload, dict) else None
         return rows
 
