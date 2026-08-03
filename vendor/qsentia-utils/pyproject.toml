@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qsentia-utils"
+version = "0.1.0"
+description = "Shared QSentia utility models and lightweight contracts."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+aws = [
+    "boto3>=1.34,<2",
+]
+db = [
+    "boto3>=1.34,<2",
+    "psycopg[binary]>=3.2,<4",
+]
+dev = [
+    "pytest>=8,<9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qsentia_utils"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
