@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import json
 import os
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -87,10 +86,6 @@ def maybe_apply_current_signal_source(config: LakeFSRuntimeConfig) -> dict[str, 
     The artifact remains the source of model identity and backtest metadata. This only replaces
     the per-run live decision/order files when an explicit fresh source is configured.
     """
-
-    command = os.getenv("QSENTIA_WORLD_RL_LIVE_SIGNAL_COMMAND", "").strip()
-    if command:
-        subprocess.run(command, shell=True, check=True)
 
     blotter_uri = _first_env(
         "QSENTIA_WORLD_RL_CURRENT_BLOTTER_URI",
