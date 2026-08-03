@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from qsentia_worldmodel_rl_containerized.config import SignalRuntimeConfig
 from qsentia_worldmodel_rl_containerized.config import LakeFSRuntimeConfig
+from qsentia_worldmodel_rl_containerized.autonomous_signal_source import maybe_apply_autonomous_current_signal_source
 from qsentia_worldmodel_rl_containerized.live_signal_refresh import (
     assert_live_signal_refresh_ready,
     build_live_signal_refresh_report,
@@ -248,6 +249,80 @@ class SignalInferenceTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "no same-day decision rows"):
                     maybe_apply_current_signal_source(_lakefs_config(root))
 
+    def test_autonomous_signal_source_generates_same_day_option_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifact(root)
+            signal_config = SignalRuntimeConfig(
+                output_path=root / "latest_signal.json",
+                append_signal_log=False,
+                use_ppo_policy=False,
+                require_ppo_policy=False,
+                target_gross_exposure=1.0,
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "QSENTIA_WORLD_RL_AUTONOMOUS_SIGNAL_ENABLED": "true",
+                    "QSENTIA_WORLD_RL_PUBLISH_CURRENT_SIGNALS": "false",
+                    "QSENTIA_SIGNAL_DATE": "2026-08-03",
+                    "QSENTIA_RUN_MODE": "entry",
+                    "QSENTIA_VALIDATE_MASSIVE_OPTION_DATA": "false",
+                    "QSENTIA_ALLOW_WORLD_RL_CURRENT_SIGNAL_EXECUTION": "true",
+                },
+                clear=True,
+            ):
+                applied = maybe_apply_autonomous_current_signal_source(_lakefs_config(root), client=_FakeLiveDataClient())
+                report = build_live_signal_refresh_report(root)
+                payload = run_signal_inference(root, signal_config)
+
+            self.assertEqual(applied["status"], "applied")
+            self.assertEqual(applied["source_type"], "autonomous_live_entry_scorer")
+            self.assertEqual(applied["decision_rows"], 1)
+            self.assertEqual(applied["order_map_rows"], 4)
+            self.assertEqual(report["status"], "ready")
+            self.assertEqual(report["candidate_rows"], 1)
+            self.assertEqual(report["mapped_option_legs"], 4)
+            order = payload["trade"]["orders"][0]
+            self.assertEqual(order["order_class"], "mleg")
+            self.assertEqual(order["metadata"]["source"], "world_rl_live_order_map")
+            self.assertEqual(order["metadata"]["action"], "short_vol_defined")
+            self.assertEqual(
+                [leg["position_intent"] for leg in order["legs"]],
+                ["buy_to_open", "buy_to_open", "sell_to_open", "sell_to_open"],
+            )
+
+    def test_autonomous_signal_source_accepts_no_current_signal_without_replaying_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_artifact(root)
+            signal_config = SignalRuntimeConfig(
+                output_path=root / "latest_signal.json",
+                append_signal_log=False,
+                use_ppo_policy=False,
+                require_ppo_policy=False,
+                target_gross_exposure=1.0,
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "QSENTIA_WORLD_RL_AUTONOMOUS_SIGNAL_ENABLED": "true",
+                    "QSENTIA_WORLD_RL_PUBLISH_CURRENT_SIGNALS": "false",
+                    "QSENTIA_SIGNAL_DATE": "2026-08-03",
+                    "QSENTIA_RUN_MODE": "entry",
+                },
+                clear=True,
+            ):
+                applied = maybe_apply_autonomous_current_signal_source(_lakefs_config(root), client=_EmptyLiveDataClient())
+                report = build_live_signal_refresh_report(root)
+                payload = run_signal_inference(root, signal_config)
+
+            self.assertEqual(applied["status"], "no_current_signal")
+            self.assertEqual(report["status"], "no_current_signal")
+            self.assertEqual(report["accepted_for_execution"], True)
+            self.assertEqual(payload["signal"]["signal"], "no_current_signal")
+            self.assertEqual(payload["trade"]["orders"], [])
+
 
 def _write_artifact(root: Path, *, selected_model: str = "v12b_small_rl_guardian") -> None:
     version = "v12b_exact_same_leg_inverse_plus_small_rl_guardian_v1"
@@ -310,6 +385,36 @@ def _lakefs_config(root: Path) -> LakeFSRuntimeConfig:
         clean=False,
         skip_download=True,
     )
+
+
+class _FakeLiveDataClient:
+    def benzinga_earnings(self, start, end, *, limit):
+        return [{"ticker": "AAPL", "date": "2026-08-06", "importance": 4}]
+
+    def stock_daily_bars(self, ticker, start, end):
+        return [{"c": 100 + (index % 3) * 0.1} for index in range(80)]
+
+    def option_contracts(self, ticker, start, end):
+        return [
+            {"ticker": "O:AAPL260918C00100000", "expiration_date": "2026-09-18", "contract_type": "call", "strike_price": 100},
+            {"ticker": "O:AAPL260918P00100000", "expiration_date": "2026-09-18", "contract_type": "put", "strike_price": 100},
+            {"ticker": "O:AAPL260918C00115000", "expiration_date": "2026-09-18", "contract_type": "call", "strike_price": 115},
+            {"ticker": "O:AAPL260918P00085000", "expiration_date": "2026-09-18", "contract_type": "put", "strike_price": 85},
+        ]
+
+    def option_previous_bar(self, option_ticker):
+        prices = {
+            "O:AAPL260918C00100000": 6.0,
+            "O:AAPL260918P00100000": 6.0,
+            "O:AAPL260918C00115000": 1.0,
+            "O:AAPL260918P00085000": 1.0,
+        }
+        return {"c": prices.get(str(option_ticker).upper(), 0.0)}
+
+
+class _EmptyLiveDataClient(_FakeLiveDataClient):
+    def benzinga_earnings(self, start, end, *, limit):
+        return []
 
 
 if __name__ == "__main__":
