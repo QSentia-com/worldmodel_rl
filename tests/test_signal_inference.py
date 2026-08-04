@@ -295,6 +295,8 @@ class SignalInferenceTests(unittest.TestCase):
                 [leg["position_intent"] for leg in order["legs"]],
                 ["buy_to_open", "buy_to_open", "sell_to_open", "sell_to_open"],
             )
+            self.assertEqual(order["qty"], "3")
+            self.assertEqual([leg["ratio_qty"] for leg in order["legs"]], ["1", "1", "1", "1"])
 
     def test_autonomous_signal_source_accepts_no_current_signal_without_replaying_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
