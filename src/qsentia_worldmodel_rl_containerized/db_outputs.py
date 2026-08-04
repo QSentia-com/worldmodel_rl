@@ -272,7 +272,7 @@ def record_alpaca_trade_orders(
                         %(broker_response)s,
                         %(metadata)s
                     )
-                    ON CONFLICT (idempotency_key) DO UPDATE SET
+                    ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET
                         status = EXCLUDED.status,
                         broker_order_id = COALESCE(EXCLUDED.broker_order_id, trade_orders.broker_order_id),
                         broker_response = EXCLUDED.broker_response,

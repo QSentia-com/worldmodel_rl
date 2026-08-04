@@ -6,6 +6,7 @@ import json
 import os
 from collections import defaultdict
 from datetime import datetime, timezone
+from math import gcd
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -198,21 +199,34 @@ def _orders_from_candidates(
 
 def _legs_from_map_rows(rows: list[dict[str, str]], run_mode: str) -> list[dict[str, str]]:
     side_column = "exit_order_side" if run_mode == "exit" else "entry_order_side"
-    legs: list[dict[str, str]] = []
+    leg_rows: list[tuple[dict[str, str], int]] = []
     for row in rows:
         symbol = _alpaca_option_symbol(row.get("option_ticker"))
         side, intent = _side_and_intent(row.get(side_column))
         if not symbol or not side or not intent:
             continue
-        legs.append(
-            {
-                "symbol": symbol,
-                "ratio_qty": str(max(1, int(float(row.get("quantity") or "1")))),
-                "side": side,
-                "position_intent": intent,
-            }
+        raw_quantity = max(1, int(float(row.get("quantity") or "1")))
+        leg_rows.append(
+            (
+                {
+                    "symbol": symbol,
+                    "side": side,
+                    "position_intent": intent,
+                },
+                raw_quantity,
+            )
         )
-    return legs
+    divisor = 0
+    for _, raw_quantity in leg_rows:
+        divisor = raw_quantity if divisor == 0 else gcd(divisor, raw_quantity)
+    divisor = max(1, divisor)
+    return [
+        {
+            **leg,
+            "ratio_qty": str(max(1, raw_quantity // divisor)),
+        }
+        for leg, raw_quantity in leg_rows
+    ]
 
 
 def _side_and_intent(raw: str | None) -> tuple[str | None, str | None]:
