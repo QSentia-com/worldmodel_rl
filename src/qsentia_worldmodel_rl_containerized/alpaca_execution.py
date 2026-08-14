@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 from .alpaca_client import AlpacaRestClient
 from .config import bool_env
+
+
+_TERMINAL_ORDER_STATUSES = {"filled", "canceled", "expired", "rejected", "failed"}
 
 
 def execute_alpaca_trade_intent(trade_intent: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -69,6 +73,7 @@ def execute_alpaca_trade_intent(trade_intent: dict[str, Any] | None) -> dict[str
         except Exception as exc:
             report["results"].append({"status": "broker_error", "payload": payload, "error": str(exc)})
         else:
+            response = _poll_submitted_order(client, str(payload.get("client_order_id") or ""), response)
             report["results"].append({"status": "submitted", "payload": payload, "response": response})
 
     if any(row.get("status") == "broker_error" for row in report["results"]):
@@ -94,3 +99,46 @@ def _account_snapshot(account: dict[str, Any]) -> dict[str, Any]:
 
 def _is_paper_base_url(base_url: str) -> bool:
     return "paper-api.alpaca.markets" in str(base_url)
+
+
+def _poll_submitted_order(client: AlpacaRestClient, client_order_id: str, response: dict[str, Any]) -> dict[str, Any]:
+    if not client_order_id:
+        return response
+
+    attempts = max(0, _int_env("QSENTIA_ALPACA_ORDER_STATUS_POLL_ATTEMPTS", 5))
+    delay_seconds = max(0.0, _float_env("QSENTIA_ALPACA_ORDER_STATUS_POLL_SECONDS", 2.0))
+    latest = response
+    for _ in range(attempts):
+        status = str(latest.get("status") or "").strip().lower()
+        if status in _TERMINAL_ORDER_STATUSES:
+            break
+        if delay_seconds:
+            time.sleep(delay_seconds)
+        try:
+            polled = client.get_order_by_client_id(client_order_id)
+        except Exception as exc:
+            latest = {**latest, "status_poll_error": str(exc)}
+            break
+        if isinstance(polled, dict) and polled:
+            latest = polled
+    return latest
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default

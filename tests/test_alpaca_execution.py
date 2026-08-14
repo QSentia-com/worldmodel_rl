@@ -42,6 +42,62 @@ class AlpacaExecutionTests(unittest.TestCase):
         self.assertEqual(report["status"], "skipped_artifact_live_trading_disabled")
         client.submit_order.assert_not_called()
 
+    def test_polls_submitted_order_until_filled(self) -> None:
+        trade_intent = {
+            "artifact_live_trading_enabled": True,
+            "orders": [
+                {
+                    "order_class": "mleg",
+                    "qty": "3",
+                    "type": "market",
+                    "time_in_force": "day",
+                    "client_order_id": "world-rl-filled-test",
+                    "legs": [
+                        {
+                            "symbol": "TDC260821C00032500",
+                            "side": "buy",
+                            "position_intent": "buy_to_open",
+                            "ratio_qty": "1",
+                        }
+                    ],
+                }
+            ],
+        }
+        with patch("qsentia_worldmodel_rl_containerized.alpaca_execution.AlpacaRestClient") as mocked:
+            client = mocked.from_env.return_value
+            client.account.return_value = {"id": "acct", "portfolio_value": "1000000"}
+            client.clock.return_value = {"is_open": True}
+            client.positions.return_value = []
+            client.get_order_by_client_id.side_effect = [
+                None,
+                {"id": "order-1", "client_order_id": "world-rl-filled-test", "status": "filled", "filled_qty": "3"},
+            ]
+            client.submit_order.return_value = {
+                "id": "order-1",
+                "client_order_id": "world-rl-filled-test",
+                "status": "pending_new",
+            }
+            with patch.dict(
+                "os.environ",
+                {
+                    "APCA_API_BASE_URL": "https://paper-api.alpaca.markets",
+                    "APCA_API_KEY_ID": "key",
+                    "APCA_API_SECRET_KEY": "secret",
+                    "QSENTIA_ALPACA_EXECUTION_ENABLED": "true",
+                    "QSENTIA_ALPACA_DRY_RUN": "false",
+                    "DRY_RUN": "false",
+                    "QSENTIA_REQUIRE_MARKET_OPEN": "false",
+                    "QSENTIA_ALPACA_ORDER_STATUS_POLL_ATTEMPTS": "2",
+                    "QSENTIA_ALPACA_ORDER_STATUS_POLL_SECONDS": "0",
+                },
+                clear=False,
+            ):
+                report = execute_alpaca_trade_intent(trade_intent)
+
+        self.assertEqual(report["status"], "completed")
+        self.assertEqual(report["results"][0]["response"]["status"], "filled")
+        self.assertEqual(client.get_order_by_client_id.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
