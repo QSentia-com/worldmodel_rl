@@ -199,33 +199,32 @@ def _orders_from_candidates(
 
 def _legs_from_map_rows(rows: list[dict[str, str]], run_mode: str) -> list[dict[str, str]]:
     side_column = "exit_order_side" if run_mode == "exit" else "entry_order_side"
-    leg_rows: list[tuple[dict[str, str], int]] = []
+    leg_rows: dict[tuple[str, str, str], int] = {}
     for row in rows:
         symbol = _alpaca_option_symbol(row.get("option_ticker"))
         side, intent = _side_and_intent(row.get(side_column))
         if not symbol or not side or not intent:
             continue
         raw_quantity = max(1, int(float(row.get("quantity") or "1")))
-        leg_rows.append(
-            (
-                {
-                    "symbol": symbol,
-                    "side": side,
-                    "position_intent": intent,
-                },
-                raw_quantity,
-            )
-        )
+        key = (symbol, side, intent)
+        leg_rows[key] = leg_rows.get(key, 0) + raw_quantity
     divisor = 0
-    for _, raw_quantity in leg_rows:
+    for raw_quantity in leg_rows.values():
         divisor = raw_quantity if divisor == 0 else gcd(divisor, raw_quantity)
     divisor = max(1, divisor)
+    if len(leg_rows) > 4:
+        raise RuntimeError(
+            f"WORLD_MODEL-RL generated {len(leg_rows)} unique option legs for one Alpaca mleg order; "
+            "Alpaca supports at most 4 legs."
+        )
     return [
         {
-            **leg,
+            "symbol": symbol,
+            "side": side,
+            "position_intent": intent,
             "ratio_qty": str(max(1, raw_quantity // divisor)),
         }
-        for leg, raw_quantity in leg_rows
+        for (symbol, side, intent), raw_quantity in leg_rows.items()
     ]
 
 

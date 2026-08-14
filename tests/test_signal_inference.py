@@ -18,7 +18,7 @@ from qsentia_worldmodel_rl_containerized.live_signal_refresh import (
     build_live_signal_refresh_report,
 )
 from qsentia_worldmodel_rl_containerized.live_signal_source import maybe_apply_current_signal_source
-from qsentia_worldmodel_rl_containerized.signal_inference import run_signal_inference
+from qsentia_worldmodel_rl_containerized.signal_inference import _legs_from_map_rows, run_signal_inference
 
 
 class SignalInferenceTests(unittest.TestCase):
@@ -297,6 +297,36 @@ class SignalInferenceTests(unittest.TestCase):
             )
             self.assertEqual(order["qty"], "3")
             self.assertEqual([leg["ratio_qty"] for leg in order["legs"]], ["1", "1", "1", "1"])
+
+    def test_duplicate_world_rl_option_legs_are_collapsed_before_alpaca_submission(self) -> None:
+        rows = [
+            {
+                "option_ticker": "O:AAPL260814C00200000",
+                "quantity": "1",
+                "entry_order_side": "SELL_TO_OPEN",
+            },
+            {
+                "option_ticker": "O:AAPL260814P00200000",
+                "quantity": "1",
+                "entry_order_side": "SELL_TO_OPEN",
+            },
+            {
+                "option_ticker": "O:AAPL260814C00200000",
+                "quantity": "1",
+                "entry_order_side": "SELL_TO_OPEN",
+            },
+            {
+                "option_ticker": "O:AAPL260814P00200000",
+                "quantity": "1",
+                "entry_order_side": "SELL_TO_OPEN",
+            },
+        ]
+
+        legs = _legs_from_map_rows(rows, "entry")
+
+        self.assertEqual(len(legs), 2)
+        self.assertEqual([leg["symbol"] for leg in legs], ["AAPL260814C00200000", "AAPL260814P00200000"])
+        self.assertEqual([leg["ratio_qty"] for leg in legs], ["1", "1"])
 
     def test_autonomous_signal_source_accepts_no_current_signal_without_replaying_history(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
